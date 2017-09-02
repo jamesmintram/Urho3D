@@ -162,6 +162,8 @@ if (CMAKE_PROJECT_NAME STREQUAL Urho3D)
     if (MINGW)
         set (DEFAULT_OPENGL TRUE)
     endif ()
+    
+    option (URHO3D_NOOP "Use noop renderer" FALSE)
     cmake_dependent_option (URHO3D_OPENGL "Use OpenGL instead of Direct3D (Windows platform only)" "${DEFAULT_OPENGL}" WIN32 TRUE)
     # On Windows platform Direct3D11 can be optionally chosen
     # Using Direct3D11 on non-MSVC compiler may require copying and renaming Microsoft official libraries (.lib to .a), else link failures or non-functioning graphics may result
@@ -345,6 +347,13 @@ if (RPI)
     set_property (CACHE RPI_ABI PROPERTY STRINGS ${RPI_SUPPORTED_ABIS})
 endif ()
 # Handle mutually exclusive options and implied options
+if (URHO3D_NOOP)
+    set (URHO3D_D3D11 0)
+    unset (URHO3D_D3D11 CACHE)
+
+    set (URHO3D_OPENGL 0)
+    unset (URHO3D_OPENGL CACHE)
+endif ()
 if (URHO3D_D3D11)
     set (URHO3D_OPENGL 0)
     unset (URHO3D_OPENGL CACHE)

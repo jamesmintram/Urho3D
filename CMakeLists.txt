@@ -148,6 +148,8 @@ set (CPACK_SYSTEM_NAME ${CPACK_SYSTEM_NAME}-${URHO3D_LIB_TYPE})
 if (WIN32 AND NOT URHO3D_OPENGL)
     if (URHO3D_D3D11)
         set (CPACK_SYSTEM_NAME ${CPACK_SYSTEM_NAME}-3D11)   # The artifact name has a space constraint on our website when viewed in a mobile browser, 3D11 stands for Direct3D 11
+    elseif (URHO3D_NOOP)
+        set (CPACK_SYSTEM_NAME ${CPACK_SYSTEM_NAME}-NOOP)
     else ()
         set (CPACK_SYSTEM_NAME ${CPACK_SYSTEM_NAME}-3D9)
     endif ()
