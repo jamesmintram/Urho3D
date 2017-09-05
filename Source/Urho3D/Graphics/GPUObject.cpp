@@ -27,6 +27,10 @@
 
 #include "../DebugNew.h"
 
+#if URHO3D_NOOP
+#include <bgfx/bgfx.h>
+#endif
+
 namespace Urho3D
 {
 
@@ -37,6 +41,8 @@ GPUObject::GPUObject(Graphics* graphics) :
 {
 #ifdef URHO3D_OPENGL
     object_.name_ = 0;
+#elif URHO3D_NOOP
+    object_.name_ = BGFX_INVALID_HANDLE;
 #else
     object_.ptr_ = 0;
 #endif

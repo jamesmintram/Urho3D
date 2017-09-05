@@ -32,7 +32,7 @@ void PS()
     #endif
 
     #if (!defined(DIFFMAP)) && (!defined(ALPHAMAP))
-        gl_FragColor = diffColor;
+        gl_FragData[0] = diffColor;
     #endif
     #ifdef DIFFMAP
         vec4 diffInput = texture2D(sDiffMap, vTexCoord);
@@ -40,7 +40,7 @@ void PS()
             if (diffInput.a < 0.5)
                 discard;
         #endif
-        gl_FragColor = diffColor * diffInput;
+        gl_FragData[0] = diffColor * diffInput;
     #endif
     #ifdef ALPHAMAP
         #ifdef GL3
@@ -48,6 +48,6 @@ void PS()
         #else
             float alphaInput = texture2D(sDiffMap, vTexCoord).a;
         #endif
-        gl_FragColor = vec4(diffColor.rgb, diffColor.a * alphaInput);
+        gl_FragData[0] = vec4(diffColor.rgb, diffColor.a * alphaInput);
     #endif
 }

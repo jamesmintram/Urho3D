@@ -1,8 +1,10 @@
 #include "../../Precompiled.h"
 
+#include "../../Core/Profiler.h"
+
 //#include "../../Graphics/ConstantBuffer.h"
 //#include "../../Graphics/GraphicsDefs.h"
-//
+#include "../../Container/HashMap.h"
 //#include "../../Core/Context.h"
 //#include "../../Core/ProcessUtils.h"
 //#include "../../Core/Profiler.h"
@@ -10,13 +12,40 @@
 #include "../../Graphics/GraphicsEvents.h"
 //#include "../../Graphics/GraphicsImpl.h"
 //#include "../../Graphics/IndexBuffer.h"
-//#include "../../Graphics/Shader.h"
+#include "../../Graphics/Shader.h"
 #include "../../Graphics/ShaderPrecache.h"
-//#include "../../Graphics/ShaderProgram.h"
+#include "../../Graphics/ShaderProgram.h"
 //#include "../../Graphics/Texture2D.h"
 //#include "../../Graphics/TextureCube.h"
 //#include "../../Graphics/VertexBuffer.h"
 //#include "../../Graphics/VertexDeclaration.h"
+
+#include "../../IO/Log.h"
+
+#include "../../Resource/ResourceCache.h"
+
+#include <SDL/SDL.h>
+#include <SDL/SDL_syswm.h>
+
+#include <bgfx/bgfx.h>
+#include <bgfx/platform.h>
+
+namespace Urho3D
+{
+    typedef HashMap<Pair<ShaderVariation*, ShaderVariation*>, SharedPtr<ShaderProgram> > ShaderProgramMap;
+}
+
+namespace {
+    bool _initialised = false;
+    
+    /// Last used shader in shader variation query.
+    Urho3D::WeakPtr<Urho3D::Shader> lastShader_;
+    /// Last used shader name in shader variation query.
+    Urho3D::String lastShaderName_;
+    
+    Urho3D::ShaderProgramMap shaderPrograms_;
+    Urho3D::ShaderProgram* shaderProgram_;
+}
 
 namespace Urho3D
 {
@@ -57,6 +86,8 @@ namespace Urho3D
 		maxScratchBufferRequest_(0),
 		defaultTextureFilterMode_(FILTER_TRILINEAR),
 		defaultTextureAnisotropy_(4),
+        shaderPath_("Shaders/GLSL/"),
+        shaderExtension_(".glsl"),
 		orientations_("LandscapeLeft LandscapeRight"),
 		apiName_("Noop")
 	{
@@ -97,6 +128,36 @@ namespace Urho3D
 		monitor_ = monitor;
 		refreshRate_ = refreshRate;
 
+        if (_initialised == false)
+        {
+            int x = 0;
+            int y = 0;
+            
+            unsigned flags =  SDL_WINDOW_SHOWN;
+            
+            window_ = SDL_CreateWindow(windowTitle_.CString(), x, y, width, height, flags);
+            SDL_ShowWindow(window_);
+            
+            SDL_SysWMinfo wmi;
+            SDL_VERSION(&wmi.version);
+            SDL_GetWindowWMInfo(window_, &wmi);
+            
+            bgfx::PlatformData pd;
+            pd.ndt          = NULL;
+            pd.nwh          = wmi.info.cocoa.window;
+            pd.context      = NULL;
+            pd.backBuffer   = NULL;
+            pd.backBufferDS = NULL;
+            bgfx::setPlatformData(pd);
+            
+            bgfx::init(bgfx::RendererType::OpenGL);
+            
+            _initialised = true;
+        }
+        bgfx::reset(width, height);
+        
+        ResetRenderTargets();
+        
 		using namespace ScreenMode;
 
 		VariantMap& eventData = GetEventDataMap();
@@ -123,13 +184,54 @@ namespace Urho3D
 	/// Set forced use of OpenGL 2 even if OpenGL 3 is available. Must be called before setting the screen mode for the first time. Default false. No effect on Direct3D9 & 11.
 	void Graphics::SetForceGL2(bool enable) {}
 	/// Close the window.
-	void Graphics::Close() {}
-	/// Take a screenshot. Return true if successful.
+	void Graphics::Close() {
+        if (!IsInitialized())
+            return;
+        
+        // Actually close the window
+        Release(true, true);
+    }
+    void Graphics::Release(bool clearGPUObjects, bool closeWindow)
+    {
+        if (!window_)
+            return;
+    
+        bgfx::shutdown();
+        
+        // End fullscreen mode first to counteract transition and getting stuck problems on OS X
+#if defined(__APPLE__) && !defined(IOS) && !defined(TVOS)
+        if (closeWindow && fullscreen_ && !externalWindow_)
+            SDL_SetWindowFullscreen(window_, 0);
+#endif
+    
+        if (closeWindow)
+        {
+            SDL_ShowCursor(SDL_TRUE);
+            
+            // Do not destroy external window except when shutting down
+            //if (!externalWindow_ || clearGPUObjects)
+            {
+                SDL_DestroyWindow(window_);
+                window_ = 0;
+            }
+        }
+        
+        _initialised = false;
+    }
+    
+    /// Take a screenshot. Return true if successful.
 	bool Graphics::TakeScreenShot(Image& destImage) { return false; }
 	/// Begin frame rendering. Return true if device available and can render.
 	bool Graphics::BeginFrame() { return true; }
 	/// End frame rendering and swap buffers.
-	void Graphics::EndFrame() {}
+	void Graphics::EndFrame()
+    {
+        static uint8_t col = 0;
+        
+        bgfx::setViewClear(0, BGFX_CLEAR_COLOR|BGFX_CLEAR_DEPTH, col++ << 8, 1.0f, 0);
+        bgfx::touch(0);
+        bgfx::frame();
+    }
 	/// Clear any or all of rendertarget, depth buffer and stencil buffer.
 	void Graphics::Clear(unsigned flags, const Color& color, float depth, unsigned stencil) {}
 	/// Resolve multisampled backbuffer to a texture rendertarget. The texture's size should match the viewport size.
@@ -138,6 +240,7 @@ namespace Urho3D
 	bool Graphics::ResolveToTexture(Texture2D* texture) { return true; }
 	/// Resolve a multisampled cube texture on itself.
 	bool Graphics::ResolveToTexture(TextureCube* texture) { return true; }
+    
 	/// Draw non-indexed geometry.
 	void Graphics::Draw(PrimitiveType type, unsigned vertexStart, unsigned vertexCount) {}
 	/// Draw indexed geometry.
@@ -150,18 +253,169 @@ namespace Urho3D
 	/// Draw indexed, instanced geometry with vertex index offset.
 	void Graphics::DrawInstanced(PrimitiveType type, unsigned indexStart, unsigned indexCount, unsigned baseVertexIndex, unsigned minVertex,
 		unsigned vertexCount, unsigned instanceCount) {}
-	/// Set vertex buffer.
-	void Graphics::SetVertexBuffer(VertexBuffer* buffer) {}
+	
+    /// Set vertex buffer.
+	void Graphics::SetVertexBuffer(VertexBuffer* buffer)
+    {
+        
+    }
 	/// Set multiple vertex buffers.
-	bool Graphics::SetVertexBuffers(const PODVector<VertexBuffer*>& buffers, unsigned instanceOffset) { return true; }
+	bool Graphics::SetVertexBuffers(const PODVector<VertexBuffer*>& buffers, unsigned instanceOffset)
+    {
+        return true;
+    }
 	/// Set multiple vertex buffers.
-	bool Graphics::SetVertexBuffers(const Vector<SharedPtr<VertexBuffer> >& buffers, unsigned instanceOffset) { return true; }
+	bool Graphics::SetVertexBuffers(const Vector<SharedPtr<VertexBuffer> >& buffers, unsigned instanceOffset)
+    {
+        return true;
+    }
 	/// Set index buffer.
 	void Graphics::SetIndexBuffer(IndexBuffer* buffer) {}
-	/// Set shaders.
-	void Graphics::SetShaders(ShaderVariation* vs, ShaderVariation* ps) {}
-	/// Set shader float constants.
-	void Graphics::SetShaderParameter(StringHash param, const float* data, unsigned count) {}
+	
+    
+    
+    /// Set shaders.
+	void Graphics::SetShaders(ShaderVariation* vs, ShaderVariation* ps)
+    {
+    
+        if (vs == vertexShader_ && ps == pixelShader_)
+            return;
+        
+        // Compile the shaders now if not yet compiled. If already attempted, do not retry
+        if (vs && !vs->GetGPUObjectName())
+        {
+            if (vs->GetCompilerOutput().Empty())
+            {
+                URHO3D_PROFILE(CompileVertexShader);
+                
+                bool success = vs->Create();
+                if (success)
+                    URHO3D_LOGDEBUG("Compiled vertex shader " + vs->GetFullName());
+                else
+                {
+                    URHO3D_LOGERROR("Failed to compile vertex shader " + vs->GetFullName() + ":\n" + vs->GetCompilerOutput());
+                    vs = 0;
+                }
+            }
+            else
+                vs = 0;
+        }
+        
+        if (ps && !ps->GetGPUObjectName())
+        {
+            if (ps->GetCompilerOutput().Empty())
+            {
+                URHO3D_PROFILE(CompilePixelShader);
+                
+                bool success = ps->Create();
+                if (success)
+                    URHO3D_LOGDEBUG("Compiled pixel shader " + ps->GetFullName());
+                else
+                {
+                    URHO3D_LOGERROR("Failed to compile pixel shader " + ps->GetFullName() + ":\n" + ps->GetCompilerOutput());
+                    ps = 0;
+                }
+            }
+            else
+                ps = 0;
+        }
+        
+        if (!vs || !ps)
+        {
+            vertexShader_ = 0;
+            pixelShader_ = 0;
+            shaderProgram_ = 0;
+        }
+        else
+        {
+            vertexShader_ = vs;
+            pixelShader_ = ps;
+            
+            Pair<ShaderVariation*, ShaderVariation*> combination(vs, ps);
+            ShaderProgramMap::Iterator i = shaderPrograms_.Find(combination);
+            
+            if (i != shaderPrograms_.End())
+            {
+                // Use the existing linked program
+                if (i->second_->GetGPUObjectName())
+                {
+                    shaderProgram_ = i->second_;
+                }
+                else
+                {
+                    shaderProgram_ = 0;
+                }
+            }
+            else
+            {
+                // Link a new combination
+                URHO3D_PROFILE(LinkShaders);
+                
+                SharedPtr<ShaderProgram> newProgram(new ShaderProgram(this, vs, ps));
+                if (newProgram->Link())
+                {
+//                    URHO3D_LOGDEBUG("Linked vertex shader " + vs->GetFullName() + " and pixel shader " + ps->GetFullName());
+                    // Note: Link() calls glUseProgram() to set the texture sampler uniforms,
+                    // so it is not necessary to call it again
+                    shaderProgram_ = newProgram;
+                }
+                else
+                {
+//                    URHO3D_LOGERROR("Failed to link vertex shader " + vs->GetFullName() + " and pixel shader " + ps->GetFullName() + ":\n" +
+//                                    newProgram->GetLinkerOutput());
+//                    glUseProgram(0);
+                    shaderProgram_ = 0;
+                }
+                
+                shaderPrograms_[combination] = newProgram;
+            }
+        }
+        
+        // Update the clip plane uniform on GL3, and set constant buffers
+
+//        if (gl3Support && impl_->shaderProgram_)
+//        {
+//            const SharedPtr<ConstantBuffer>* constantBuffers = impl_->shaderProgram_->GetConstantBuffers();
+//            for (unsigned i = 0; i < MAX_SHADER_PARAMETER_GROUPS * 2; ++i)
+//            {
+//                ConstantBuffer* buffer = constantBuffers[i].Get();
+//                if (buffer != impl_->constantBuffers_[i])
+//                {
+//                    unsigned object = buffer ? buffer->GetGPUObjectName() : 0;
+//                    glBindBufferBase(GL_UNIFORM_BUFFER, i, object);
+//                    // Calling glBindBufferBase also affects the generic buffer binding point
+//                    impl_->boundUBO_ = object;
+//                    impl_->constantBuffers_[i] = buffer;
+//                    ShaderProgram::ClearGlobalParameterSource((ShaderParameterGroup)(i % MAX_SHADER_PARAMETER_GROUPS));
+//                }
+//            }
+//            
+//            SetShaderParameter(VSP_CLIPPLANE, useClipPlane_ ? clipPlane_ : Vector4(0.0f, 0.0f, 0.0f, 1.0f));
+//        }
+
+        
+        // Store shader combination if shader dumping in progress
+        if (shaderPrecache_)
+            shaderPrecache_->StoreShaders(vertexShader_, pixelShader_);
+        
+//        if (impl_->shaderProgram_)
+//        {
+//            impl_->usedVertexAttributes_ = impl_->shaderProgram_->GetUsedVertexAttributes();
+//            impl_->vertexAttributes_ = &impl_->shaderProgram_->GetVertexAttributes();
+//        }
+//        else
+//        {
+//            impl_->usedVertexAttributes_ = 0;
+//            impl_->vertexAttributes_ = 0;
+//        }
+//        
+//        impl_->vertexBuffersDirty_ = true;
+        
+    }
+    
+    
+    /// Set shader float constants.
+    void Graphics::SetShaderParameter(StringHash param, const float* data, unsigned count) {}
 	/// Set shader float constant.
 	void Graphics::SetShaderParameter(StringHash param, float value) {}
 	/// Set shader integer constant.
@@ -182,6 +436,8 @@ namespace Urho3D
 	void Graphics::SetShaderParameter(StringHash param, const Vector4& vector) {}
 	/// Set shader 3x4 matrix constant.
 	void Graphics::SetShaderParameter(StringHash param, const Matrix3x4& matrix) {}
+    
+    
 	/// Check whether a shader parameter group needs update. Does not actually check whether parameters exist in the shaders.
 	bool Graphics::NeedParameterUpdate(ShaderParameterGroup group, const void* source) { return false; }
 	/// Check whether a shader parameter exists on the currently set shaders.
@@ -194,7 +450,9 @@ namespace Urho3D
 	void Graphics::ClearParameterSources() {}
 	/// Clear remembered transform shader parameter sources.
 	void Graphics::ClearTransformSources() {}
-	/// Set texture.
+	
+    
+    /// Set texture.
 	void Graphics::SetTexture(unsigned index, Texture* texture) {}
 	/// Bind texture unit 0 for update. Called by Texture. Used only on OpenGL.
 	void Graphics::SetTextureForUpdate(Texture* texture) {}
@@ -204,8 +462,13 @@ namespace Urho3D
 	void Graphics::SetDefaultTextureFilterMode(TextureFilterMode mode) {}
 	/// Set default texture anisotropy level. Called by Renderer before rendering.
 	void Graphics::SetDefaultTextureAnisotropy(unsigned level) {}
+    
 	/// Reset all rendertargets, depth-stencil surface and viewport.
-	void Graphics::ResetRenderTargets() {}
+	void Graphics::ResetRenderTargets()
+    {
+        SetDepthStencil((RenderSurface*)0);
+        SetViewport(IntRect(0, 0, width_, height_));
+    }
 	/// Reset specific rendertarget.
 	void Graphics::ResetRenderTarget(unsigned index) {}
 	/// Reset depth-stencil surface.
@@ -232,7 +495,7 @@ namespace Urho3D
 	/// Set viewport.
 	void Graphics::SetViewport(const IntRect& rect)
 	{
-
+        bgfx::setViewRect(0, rect.left_, rect.top_, rect.right_, rect.bottom_);
 	}
 	/// Set blending and alpha-to-coverage modes. Alpha-to-coverage is not supported on Direct3D9.
 	void Graphics::SetBlendMode(BlendMode mode, bool alphaToCoverage)
@@ -321,7 +584,7 @@ namespace Urho3D
 	/// Return whether rendering initialized.
 	bool Graphics::IsInitialized() const
 	{
-		return true;
+		return _initialised;
 	}
 	
 	/// Return whether rendering output is dithered.
@@ -355,16 +618,27 @@ namespace Urho3D
 	/// Return a shader variation by name and defines.
 	ShaderVariation* Graphics::GetShader(ShaderType type, const String& name, const String& defines) const
 	{
-		//TOFIX
-		return nullptr;
+        return GetShader(type, name.CString(), defines.CString());
 	}
 	/// Return a shader variation by name and defines.
 	ShaderVariation* Graphics::GetShader(ShaderType type, const char* name, const char* defines) const
 	{
-		//TOFIX
-		return nullptr;
-	}
-	/// Return current vertex buffer by index.
+        if (lastShaderName_ != name || !lastShader_)
+        {
+            ResourceCache* cache = GetSubsystem<ResourceCache>();
+            
+            String fullShaderName = shaderPath_ + name + shaderExtension_;
+            // Try to reduce repeated error log prints because of missing shaders
+            if (lastShaderName_ == name && !cache->Exists(fullShaderName))
+                return 0;
+            
+            lastShader_ = cache->GetResource<Shader>(fullShaderName);
+            lastShaderName_ = name;
+        }
+        
+        return lastShader_ ? lastShader_->GetVariation(type, defines) : (ShaderVariation*)0;
+    }
+    /// Return current vertex buffer by index.
 	VertexBuffer* Graphics::GetVertexBuffer(unsigned index) const
 	{
 		//TOFIX
@@ -517,6 +791,6 @@ namespace Urho3D
 	/// Return maximum number of supported bones for skinning.
 	unsigned Graphics::GetMaxBones() { return 0; }
 	/// Return whether is using an OpenGL 3 context. Return always false on Direct3D9 & Direct3D11.
-	bool Graphics::GetGL3Support() { return false; }
+	bool Graphics::GetGL3Support() { return true; }
 
 }

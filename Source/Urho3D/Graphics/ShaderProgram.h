@@ -28,6 +28,8 @@
 #include "OpenGL/OGLShaderProgram.h"
 #elif defined(URHO3D_D3D11)
 #include "Direct3D11/D3D11ShaderProgram.h"
-#else
+#elif defined(URHO3D_D3D9)
 #include "Direct3D9/D3D9ShaderProgram.h"
+#else
+#include "Noop/NoopShaderProgram.h"
 #endif

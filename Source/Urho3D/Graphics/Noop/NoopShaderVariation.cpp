@@ -31,8 +31,12 @@
 #include "../../IO/Log.h"
 #include "../../Resource/ResourceCache.h"
 
-#include <d3dcompiler.h>
-#include <MojoShader/mojoshader.h>
+//#include <d3dcompiler.h>
+//#include <MojoShader/mojoshader.h>
+
+#include <bx/readerwriter.h>
+#include <bx/string.h>
+#include <bgfx/bgfx.h>
 
 #include "../../DebugNew.h"
 
@@ -51,15 +55,183 @@ namespace Urho3D
 
 	bool ShaderVariation::Create()
 	{
-		return true;
-	}
+        Release();
+        
+        if (!owner_)
+        {
+            compilerOutput_ = "Owner shader has expired";
+            return false;
+        }
+        
+        //object_.name_ = glCreateShader(type_ == VS ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER);
+        //if (!object_.name_)
+        //{
+        //    compilerOutput_ = "Could not create shader object";
+        //    return false;
+        //}
+        
+        const String& originalShaderCode = owner_->GetSourceCode(type_);
+        String shaderCode;
+        
+        // Check if the shader code contains a version define
+        unsigned verStart = originalShaderCode.Find('#');
+        unsigned verEnd = 0;
+        if (verStart != String::NPOS)
+        {
+            if (originalShaderCode.Substring(verStart + 1, 7) == "version")
+            {
+                verEnd = verStart + 9;
+                while (verEnd < originalShaderCode.Length())
+                {
+                    if (IsDigit((unsigned)originalShaderCode[verEnd]))
+                        ++verEnd;
+                    else
+                        break;
+                }
+                // If version define found, insert it first
+                String versionDefine = originalShaderCode.Substring(verStart, verEnd - verStart);
+                shaderCode += versionDefine + "\n";
+            }
+        }
+        // Force GLSL version 150 if no version define and GL3 is being used
+        //if (!verEnd && Graphics::GetGL3Support())
+        //    shaderCode += "#version 150\n";
+        
+        // Distinguish between VS and PS compile in case the shader code wants to include/omit different things
+        shaderCode += type_ == VS ? "#define COMPILEVS\n" : "#define COMPILEPS\n";
+        
+        // Add define for the maximum number of supported bones
+        shaderCode += "#define MAXBONES " + String(Graphics::GetMaxBones()) + "\n";
+        
+        // Prepend the defines to the shader code
+        Vector<String> defineVec = defines_.Split(' ');
+        for (unsigned i = 0; i < defineVec.Size(); ++i)
+        {
+            // Add extra space for the checking code below
+            String defineString = "#define " + defineVec[i].Replaced('=', ' ') + " \n";
+            shaderCode += defineString;
+            
+            // In debug mode, check that all defines are referenced by the shader code
+#ifdef _DEBUG
+            String defineCheck = defineString.Substring(8, defineString.Find(' ', 8) - 8);
+            if (originalShaderCode.Find(defineCheck) == String::NPOS)
+                URHO3D_LOGWARNING("Shader " + GetFullName() + " does not use the define " + defineCheck);
+#endif
+        }
+        
+#ifdef RPI
+        if (type_ == VS)
+            shaderCode += "#define RPI\n";
+#endif
+#ifdef __EMSCRIPTEN__
+        shaderCode += "#define WEBGL\n";
+#endif
+        if (Graphics::GetGL3Support())
+            shaderCode += "#define GL3\n";
 
-	void ShaderVariation::Release()
-	{
-		
-	}
+        if (type_ == VS)
+            shaderCode += "#define VS main\n";
+        if (type_ == PS)
+            shaderCode += "#define PS main\n";
+        
+        // When version define found, do not insert it a second time
+        if (verEnd > 0)
+            shaderCode += (originalShaderCode.CString() + verEnd);
+        else
+            shaderCode += originalShaderCode;
+        
+        
+        bx::DefaultAllocator allocator;
+        bx::MemoryBlock mb(&allocator);
+        bx::MemoryWriter writer(&mb);
+        
+        
+#define BGFX_CHUNK_MAGIC_CSH BX_MAKEFOURCC('C', 'S', 'H', 0x3)
+#define BGFX_CHUNK_MAGIC_FSH BX_MAKEFOURCC('F', 'S', 'H', 0x5)
+#define BGFX_CHUNK_MAGIC_VSH BX_MAKEFOURCC('V', 'S', 'H', 0x5)
+        
+        if (type_ == VS)
+        {
+            bx::write(&writer, BGFX_CHUNK_MAGIC_VSH);
+        }
+        else if (type_ == PS)
+        {
+            bx::write(&writer, BGFX_CHUNK_MAGIC_FSH);
+        }
+        bx::write(&writer, 0);//inputHash);
+        
+        bx::write(&writer, uint16_t(0) );
+        
+        uint32_t shaderSize = shaderCode.Length();
+        bx::write(&writer, shaderSize);
+        bx::write(&writer, shaderCode.CString(), shaderCode.Length());
+        bx::write(&writer, uint8_t(0) );
+        
+        bgfx::Memory const *shaderData = bgfx::alloc(bx::getSize(&writer));
+        bx::memCopy(shaderData->data, mb.more(), bx::getSize(&writer));
+        
+        
+        //bx::memCopy(shaderData->data, shaderCode.CString(), shaderData->size);
+        bgfx::ShaderHandle shader = bgfx::createShader(shaderData);
+        
+        object_.name_ = shader.idx;
+        
+//        const char* shaderCStr = shaderCode.CString();
+//        glShaderSource(object_.name_, 1, &shaderCStr, 0);
+//        glCompileShader(object_.name_);
+//        
+//        int compiled, length;
+//        glGetShaderiv(object_.name_, GL_COMPILE_STATUS, &compiled);
+//        if (!compiled)
+//        {
+//            glGetShaderiv(object_.name_, GL_INFO_LOG_LENGTH, &length);
+//            compilerOutput_.Resize((unsigned)length);
+//            int outLength;
+//            glGetShaderInfoLog(object_.name_, length, &outLength, &compilerOutput_[0]);
+//            glDeleteShader(object_.name_);
+//            object_.name_ = 0;
+//        }
+//        else
+//            compilerOutput_.Clear();
+        
+        return bgfx::isValid(shader);
+    }
+    
+    void ShaderVariation::Release()
+    {
+        bgfx::ShaderHandle handle;
+        handle.idx = object_.name_;
+        
+        if (bgfx::isValid(handle))
+        {
+            if (!graphics_)
+                return;
 
-	void ShaderVariation::SetDefines(const String& defines)
+            if (!graphics_->IsDeviceLost())
+            {
+                if (type_ == VS)
+                {
+                    if (graphics_->GetVertexShader() == this)
+                        graphics_->SetShaders(0, 0);
+                }
+                else
+                {
+                    if (graphics_->GetPixelShader() == this)
+                        graphics_->SetShaders(0, 0);
+                }
+
+                bgfx::destroy(handle);
+            }
+            
+            object_.name_ = 0;
+            graphics_->CleanupShaderPrograms(this);
+
+        }
+        
+//        compilerOutput_.Clear();
+    }
+    
+    void ShaderVariation::SetDefines(const String& defines)
 	{
 		defines_ = defines;
 	}

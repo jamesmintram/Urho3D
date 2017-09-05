@@ -29,6 +29,80 @@
 
 #include "../../DebugNew.h"
 
+#include <bgfx/bgfx.h>
+#include <bx/bx.h>
+
+bgfx::VertexDecl createDecl(Urho3D::PODVector<Urho3D::VertexElement> const &elements)
+{
+    bgfx::VertexDecl decl;
+    
+    decl.begin();
+    
+    static bgfx::Attrib::Enum attribMap[] = {
+        bgfx::Attrib::Position,
+        bgfx::Attrib::Normal,
+        bgfx::Attrib::Bitangent,
+        bgfx::Attrib::Tangent,
+        
+        bgfx::Attrib::TexCoord0,
+        bgfx::Attrib::Color0,
+        bgfx::Attrib::Weight,
+        bgfx::Attrib::Indices,
+        
+        bgfx::Attrib::TexCoord7
+    };
+    static bgfx::AttribType::Enum typeMap[] = {
+        bgfx::AttribType::Int16,
+        bgfx::AttribType::Float,
+        bgfx::AttribType::Float,
+        bgfx::AttribType::Float,
+        bgfx::AttribType::Float,
+        bgfx::AttribType::Uint8,
+        bgfx::AttribType::Uint8
+    };
+    static int countMap[] = {
+        1,
+        1,
+        2,
+        3,
+        4,
+        4,
+        4
+    };
+    
+    int texIdx = 0;
+    int colIdx = 0;
+    
+    for (int idx = 0; idx < elements.Size(); idx++)
+    {
+        const Urho3D::VertexElementSemantic sem = elements[idx].semantic_;
+        const Urho3D::VertexElementType typ = elements[idx].type_;
+        
+        const bool normalised = typ == Urho3D::TYPE_UBYTE4_NORM;
+        const bgfx::AttribType::Enum bgfxType = typeMap[typ];
+        const int count = countMap[typ];
+        
+        if (sem ==  Urho3D::SEM_TEXCOORD)
+        {
+            decl.add((bgfx::Attrib::Enum)(bgfx::Attrib::TexCoord0 + texIdx), count, bgfxType, normalised);
+            texIdx++;
+        }
+        else if(sem ==  Urho3D::SEM_COLOR)
+        {
+            decl.add((bgfx::Attrib::Enum)(bgfx::Attrib::Color0 + colIdx), count, bgfxType, normalised);
+            colIdx++;
+        }
+        else
+        {
+            decl.add(attribMap[sem], count, bgfxType, normalised);
+        }
+    }
+    
+    decl.end();
+
+    return decl;
+}
+
 namespace Urho3D
 {
 
@@ -44,28 +118,60 @@ namespace Urho3D
 
 	void VertexBuffer::Release()
 	{
-		if (object_.ptr_ != nullptr)
-		{
-			delete[] object_.ptr_;
-			object_.ptr_ = nullptr;
-		}
+        if (dynamic_)
+        {
+            bgfx::DynamicVertexBufferHandle vbo; vbo.idx = object_.name_;
+            if (bgfx::isValid(vbo))
+            {
+                bgfx::destroy(vbo);
+            }
+        }
+        else
+        {
+            bgfx::VertexBufferHandle vbo; vbo.idx = object_.name_;
+            if (bgfx::isValid(vbo))
+            {
+                bgfx::destroy(vbo);
+            }
+        }
+        
+        object_.name_ = BGFX_INVALID_HANDLE;
 	}
 
 	bool VertexBuffer::SetData(const void* data)
 	{
-		//memcpy(object_.ptr_, data, count);
-		return false;
+        bgfx::VertexDecl decl = createDecl(this->elements_);
+        if (dynamic_)
+        {
+            //TODO: Check if object name is valid - if so then we are just uploading some new darta
+            bgfx::DynamicVertexBufferHandle vbo = bgfx::createDynamicVertexBuffer(vertexCount_, decl);
+            this->object_.name_= vbo.idx;
+        }
+        else
+        {
+            //TODO: Check that out object_name is invalid as we can only set data once
+            bgfx::Memory const *data = bgfx::alloc(decl.getSize(this->vertexCount_));
+            bx::memCopy(data->data, data, data->size);
+            
+            bgfx::VertexBufferHandle vbo = bgfx::createVertexBuffer(data, decl);
+            this->object_.name_= vbo.idx;
+        }
+        
+		return true;
 	}
 
 	bool VertexBuffer::SetDataRange(const void* data, unsigned start, unsigned count, bool discard)
 	{
-		memcpy(&((char*)object_.ptr_)[start], data, count);
+        //TODO: Implement
+		//memcpy(&((char*)object_.ptr_)[start], data, count);
 		return true;
 	}
 
 	void* VertexBuffer::Lock(unsigned start, unsigned count, bool discard)
 	{
-		return &((char*)object_.ptr_)[start];
+        //TODO: Implement
+        return nullptr;
+		//return &((char*)object_.ptr_)[start];
 	}
 
 	void VertexBuffer::Unlock()
@@ -75,15 +181,15 @@ namespace Urho3D
 
 	bool VertexBuffer::Create()
 	{
+        
 		Release();
-
+        
 		if (!vertexCount_ || elements_.Empty())
 			return true;
 
 		if (graphics_)
 		{
-			size_t memSize = vertexCount_ * vertexSize_;
-			object_.ptr_ = new char[memSize];
+
 		}
 		return true;
 	}
@@ -95,7 +201,10 @@ namespace Urho3D
 
 	void* VertexBuffer::MapBuffer(unsigned start, unsigned count, bool discard)
 	{
-		return &((char*)object_.ptr_)[start];
+        //TODO: Implement
+        return nullptr;
+        
+		//return &((char*)object_.ptr_)[start];
 	}
 
 	void VertexBuffer::UnmapBuffer()
